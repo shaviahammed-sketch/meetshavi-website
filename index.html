@@ -1,0 +1,631 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+    getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+    getFirestore, doc, getDoc, setDoc, collection, onSnapshot, updateDoc 
+} from 'firebase/firestore';
+
+// গ্লোবাল ভেরিয়েবল সেটআপ (ক্যানভাস এনভায়রনমেন্ট থেকে)
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'meetshavi-default-app';
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+// Owner ID ভেরিয়েবল: প্রথম নিবন্ধিত ব্যবহারকারী স্বয়ংক্রিয়ভাবে Owner হবে।
+let OWNER_UID = "OWNER_ID_TO_BE_REPLACED"; 
+
+// ফায়ারবেস ইনিশিয়ালাইজেশন ও ইউটিলিটি ফাংশন
+let app, db, auth;
+if (Object.keys(firebaseConfig).length > 0) {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+    auth = getAuth(app);
+}
+
+// ------------------- ডেটাবেস পাথ ইউটিলিটি -------------------
+
+const getMemberDocPath = (uid) => doc(db, 'artifacts', appId, 'users', uid, 'profile', 'data');
+const getMembersCollectionPath = () => collection(db, 'artifacts', appId, 'public', 'data', 'members');
+const getPostsCollectionPath = () => collection(db, 'artifacts', appId, 'public', 'data', 'shavi_posts');
+const getChatDocPath = (memberUid1, memberUid2) => {
+    const sortedUids = [memberUid1, memberUid2].sort();
+    const chatId = sortedUids.join('_');
+    return doc(db, 'artifacts', appId, 'public', 'data', 'chats', chatId);
+};
+const getOwnerConfigDoc = () => doc(db, 'artifacts', appId, 'public', 'data', 'config', 'owner');
+
+
+// ------------------- মেইন অ্যাপ কম্পোনেন্ট -------------------
+
+const App = () => {
+    const [view, setView] = useState('welcome'); // welcome, register, dashboard
+    const [user, setUser] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [registrationData, setRegistrationData] = useState(null);
+    const [isBlocked, setIsBlocked] = useState(false);
+    const [ownerUidFromDB, setOwnerUidFromDB] = useState(null);
+
+    const isOwner = useMemo(() => userId && userId === ownerUidFromDB, [userId, ownerUidFromDB]);
+
+    // ১. ফায়ারবেস ইনিশিয়ালাইজেশন এবং অথেন্টিকেশন
+    useEffect(() => {
+        if (!auth || !db) {
+            console.error("Firebase is not configured properly.");
+            setIsAuthReady(true);
+            return;
+        }
+
+        const setupAuth = async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Authentication failed:", error);
+                await signInAnonymously(auth); // Fallback
+            }
+        };
+        
+        setupAuth();
+
+        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+            if (currentUser) {
+                const currentUid = currentUser.uid;
+                setUser(currentUser);
+                setUserId(currentUid);
+                
+                // Owner ID লোড করা
+                const ownerConfigRef = getOwnerConfigDoc();
+                const ownerConfigSnap = await getDoc(ownerConfigRef);
+                if (ownerConfigSnap.exists()) {
+                    setOwnerUidFromDB(ownerConfigSnap.data().ownerId);
+                }
+
+                // ব্যবহারকারীর ডেটা লোড করা
+                const docRef = getMemberDocPath(currentUid);
+                const docSnap = await getDoc(docRef);
+                
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    setRegistrationData(data);
+                    if (data.isBlocked) {
+                         setIsBlocked(true); 
+                         setView('blocked');
+                    } else {
+                        setView('dashboard'); 
+                    }
+                } else {
+                    setView('welcome'); 
+                }
+            } else {
+                setUser(null);
+                setUserId(null);
+                setOwnerUidFromDB(null);
+            }
+            setIsAuthReady(true);
+        });
+
+        return () => unsubscribe();
+    }, []);
+
+
+    // ------------------- UI কম্পোনেন্ট -------------------
+
+    // লাক্সারি মেনু/স্বাগতম স্ক্রিন
+    const WelcomeScreen = ({ goToRegister }) => {
+        const [token, setToken] = useState('');
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState('');
+
+        const handleAccess = async () => {
+            if (!userId || !registrationData) {
+                setError('রেজিস্ট্রেশন ডেটা পাওয়া যাচ্ছে না।');
+                return;
+            }
+
+            // টোকেন ভেরিফিকেশন: (কৌতুহল) = মেম্বারের বয়স
+            const expectedToken = `Imagine yourself with Shavi-666-${registrationData?.age}`;
+            
+            if (token !== expectedToken) {
+                setError('অ্যাক্সেস টোকেন ভুল! সঠিক টোকেন দিয়ে চেষ্টা করুন।');
+                return;
+            }
+
+            setLoading(true);
+            setError('');
+            
+            // টোকেন সঠিক হলে, ব্যবহারকারীকে ড্যাশবোর্ডে প্রবেশ করতে দিন
+            setView('dashboard');
+            setLoading(false);
+        };
+        
+        const isRegistered = !!registrationData;
+
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-purple-900 to-indigo-800 flex items-center justify-center p-4">
+                <div className="max-w-md w-full p-8 bg-white/10 backdrop-blur-sm rounded-3xl shadow-2xl border border-white/20 text-center text-white space-y-8">
+                    <h1 className="text-4xl font-extrabold tracking-widest uppercase">
+                        Welcome to the world of Shavi
+                    </h1>
+                    <p className="text-lg font-light italic border-b border-white/30 pb-4">
+                        একটি ব্যক্তিগত ও লাক্সারি কমিউনিটির প্রবেশদ্বার
+                    </p>
+
+                    {isRegistered ? (
+                        <div className="space-y-4">
+                            <p className="text-md font-medium">
+                                প্রিয় {registrationData?.name || 'মেম্বার'}, আপনি ইতিমধ্যেই নিবন্ধিত। আপনার ১২ ঘণ্টার অ্যাক্সেস টোকেন কোডটি নিচে বসান।
+                            </p>
+                            <p className="text-sm text-yellow-300 font-mono italic">
+                                টোকেন কোড: **Imagine yourself with Shavi-666-{registrationData?.age}(কৌতুহল)**
+                            </p>
+                            <input 
+                                type="text"
+                                value={token}
+                                onChange={(e) => setToken(e.target.value)}
+                                placeholder="অ্যাক্সেস টোকেন কোড লিখুন..."
+                                className="w-full p-3 rounded-lg bg-white/20 border border-white/30 placeholder-white/80 text-white focus:ring-2 focus:ring-indigo-300 focus:outline-none transition"
+                                disabled={loading}
+                            />
+                            <button
+                                onClick={handleAccess}
+                                disabled={loading || !token}
+                                className="w-full py-3 bg-indigo-500 hover:bg-indigo-600 rounded-full font-bold uppercase shadow-lg transition duration-300 transform hover:scale-105 disabled:opacity-50"
+                            >
+                                {loading ? 'প্রবেশ করা হচ্ছে...' : 'প্রবেশ করুন'}
+                            </button>
+                            {error && <p className="text-red-400 text-sm mt-2">{error}</p>}
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                             <p className="text-lg font-medium">
+                                কমিউনিটিতে প্রবেশ করতে হলে আপনাকে রেজিস্ট্রেশন করতে হবে।
+                            </p>
+                             <button
+                                onClick={goToRegister}
+                                className="w-full py-3 bg-purple-600 hover:bg-purple-700 rounded-full font-bold uppercase shadow-lg transition duration-300 transform hover:scale-105"
+                            >
+                                রেজিস্ট্রেশন করুন
+                            </button>
+                        </div>
+                    )}
+                     <p className="text-xs text-white/50 pt-4">আপনার ইউজার আইডি: <span className="font-mono text-white">{userId || 'Loading...'}</span></p>
+                     {isOwner && <p className="text-xs text-green-400 font-bold">আপনিই Owner!</p>}
+                </div>
+            </div>
+        );
+    };
+
+    // রেজিস্ট্রেশন ফর্ম
+    const RegisterScreen = ({ goToWelcome }) => {
+        const [form, setForm] = useState({ name: '', email: '', whatsapp: '', age: '', address: '' });
+        const [loading, setLoading] = useState(false);
+        const [error, setError] = useState('');
+        const [success, setSuccess] = useState(false);
+
+        const handleChange = (e) => {
+            setForm({ ...form, [e.target.name]: e.target.value });
+        };
+
+        const handleSubmit = async (e) => {
+            e.preventDefault();
+            if (!userId || !auth.currentUser) {
+                setError('ব্যবহারকারী অথেন্টিকেট হয়নি। অনুগ্রহ করে পেজ রিলোড করুন।');
+                return;
+            }
+            
+            if (!form.name || !form.email || !form.whatsapp || !form.age || !form.address) {
+                setError('সকল ফিল্ড পূরণ করা আবশ্যক।');
+                return;
+            }
+
+            setLoading(true);
+            setError('');
+
+            const registrationPayload = {
+                ...form,
+                uid: userId,
+                role: 'member',
+                registrationDate: new Date().toISOString(),
+                isBlocked: false,
+                hasAccess: false, 
+            };
+
+            try {
+                // ১. Owner আইডি সেট করা (যদি এখনও সেট না হয়ে থাকে)
+                if (!ownerUidFromDB) {
+                    await setDoc(getOwnerConfigDoc(), { ownerId: userId });
+                    setOwnerUidFromDB(userId);
+                }
+
+                // ২. পাবলিক 'members' কালেকশনে সংক্ষিপ্ত ডেটা সংরক্ষণ
+                await setDoc(doc(getMembersCollectionPath(), userId), {
+                    name: form.name,
+                    whatsapp: form.whatsapp,
+                    isBlocked: false,
+                    lastActive: new Date().toISOString(),
+                });
+
+                // ৩. ব্যবহারকারীর ব্যক্তিগত প্রোফাইল ডেটা সংরক্ষণ
+                await setDoc(getMemberDocPath(userId), registrationPayload);
+
+                setRegistrationData(registrationPayload);
+                setSuccess(true);
+                
+                setTimeout(() => goToWelcome(), 2000);
+
+            } catch (err) {
+                console.error("Registration failed: ", err);
+                setError('রেজিস্ট্রেশন ব্যর্থ হয়েছে। আবার চেষ্টা করুন।');
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        if (success) {
+            return (
+                <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+                    <div className="p-8 bg-green-50 rounded-xl shadow-lg text-center border border-green-200">
+                        <h2 className="text-2xl font-bold text-green-700 mb-4">অভিনন্দন! রেজিস্ট্রেশন সম্পূর্ণ।</h2>
+                        <p className="text-gray-600">
+                            অ্যাক্সেস টোকেন কোডের জন্য আপনার হোয়াটসঅ্যাপ চেক করুন। আপনাকে ২ সেকেন্ড পর প্রবেশ স্ক্রিনে নিয়ে যাওয়া হবে।
+                        </p>
+                    </div>
+                </div>
+            );
+        }
+
+        return (
+            <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+                <div className="max-w-lg w-full p-8 bg-white rounded-xl shadow-2xl">
+                    <h2 className="text-3xl font-bold text-indigo-700 mb-6 text-center">নতুন মেম্বার রেজিস্ট্রেশন</h2>
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                         <div>
+                            <label className="block text-sm font-medium text-gray-700">নাম</label>
+                            <input type="text" name="name" value={form.name} onChange={handleChange} 
+                                className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500" required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">ইমেইল এড্রেস</label>
+                            <input type="email" name="email" value={form.email} onChange={handleChange} 
+                                className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500" required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">হোয়াটসঅ্যাপ নাম্বার</label>
+                            <input type="text" name="whatsapp" value={form.whatsapp} onChange={handleChange} 
+                                className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500" required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">বয়স</label>
+                            <input type="number" name="age" value={form.age} onChange={handleChange} 
+                                className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500" required />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700">ঠিকানা</label>
+                            <input type="text" name="address" value={form.address} onChange={handleChange} 
+                                className="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500" required />
+                        </div>
+                        
+                        {error && <p className="text-red-500 text-sm">{error}</p>}
+
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="w-full py-3 mt-4 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition duration-300 disabled:opacity-50 shadow-lg"
+                        >
+                            {loading ? 'জমা দেওয়া হচ্ছে...' : 'রেজিস্ট্রেশন সম্পূর্ণ করুন'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={goToWelcome}
+                            className="w-full py-3 mt-2 text-indigo-600 bg-gray-200 rounded-lg font-semibold hover:bg-gray-300 transition duration-300"
+                        >
+                            পেছনে ফিরুন
+                        </button>
+                    </form>
+                </div>
+            </div>
+        );
+    };
+
+    // ড্যাশবোর্ড (অ্যাক্সেস পাওয়ার পর)
+    const Dashboard = ({ isOwner, currentUserId, currentUserName }) => {
+        const [posts, setPosts] = useState([]);
+        const [members, setMembers] = useState([]);
+        const [activeChat, setActiveChat] = useState(null); 
+        const [chatMessages, setChatMessages] = useState([]);
+        const [messageInput, setMessageInput] = useState('');
+        const [newPostContent, setNewPostContent] = useState('');
+        const [postType, setPostType] = useState('কবিতা');
+
+        // Shavi (Owner) Post Management
+        const handleNewPost = async () => {
+            if (!newPostContent.trim() || !isOwner) return;
+
+            const postPayload = {
+                content: newPostContent,
+                type: postType,
+                timestamp: new Date().toISOString(),
+                ownerId: currentUserId,
+            };
+
+            try {
+                const postsCol = getPostsCollectionPath();
+                await setDoc(doc(postsCol), postPayload); 
+                setNewPostContent('');
+            } catch (error) {
+                console.error("Error adding post: ", error);
+            }
+        };
+
+        // ব্লক ফাংশন (শুধুমাত্র Owner এর জন্য)
+        const handleBlockMember = async (memberUid, isCurrentlyBlocked) => {
+            if (!isOwner || !memberUid) return;
+            
+            const memberDocRef = getMemberDocPath(memberUid);
+            await updateDoc(memberDocRef, { isBlocked: !isCurrentlyBlocked });
+
+             const publicMemberDocRef = doc(getMembersCollectionPath(), memberUid);
+             await updateDoc(publicMemberDocRef, { isBlocked: !isCurrentlyBlocked });
+        };
+
+        // পোস্ট এবং মেম্বার ডেটা রিয়েল-টাইমে লোড করা
+        useEffect(() => {
+            if (!db || !isAuthReady) return;
+
+            // পোস্ট লোড করা
+            const unsubscribePosts = onSnapshot(getPostsCollectionPath(), (snapshot) => {
+                const loadedPosts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+                                                 .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                setPosts(loadedPosts);
+            }, (error) => console.error("Error loading posts:", error));
+
+            // মেম্বার লোড করা
+            const unsubscribeMembers = onSnapshot(getMembersCollectionPath(), (snapshot) => {
+                const loadedMembers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+                                                   .filter(m => m.id !== currentUserId);
+                setMembers(loadedMembers);
+            }, (error) => console.error("Error loading members:", error));
+
+            return () => {
+                unsubscribePosts();
+                unsubscribeMembers();
+            };
+        }, [isAuthReady, currentUserId]);
+
+
+        // চ্যাট মেসেজ লোড করা
+        useEffect(() => {
+            if (!db || !activeChat || !currentUserId) {
+                setChatMessages([]);
+                return;
+            }
+
+            const chatDocRef = getChatDocPath(currentUserId, activeChat);
+
+            const unsubscribeChat = onSnapshot(chatDocRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    setChatMessages(docSnap.data().messages || []);
+                } else {
+                    setChatMessages([]);
+                }
+            }, (error) => console.error("Error loading chat:", error));
+
+            return () => unsubscribeChat();
+        }, [activeChat, currentUserId]);
+
+
+        // মেসেজ পাঠানো
+        const handleSendMessage = async () => {
+            if (!messageInput.trim() || !activeChat) return;
+
+            const newMessage = {
+                text: messageInput,
+                senderId: currentUserId,
+                timestamp: new Date().toISOString(),
+                senderName: currentUserName,
+            };
+
+            const chatDocRef = getChatDocPath(currentUserId, activeChat);
+
+            try {
+                const currentData = (await getDoc(chatDocRef)).data();
+                const existingMessages = currentData?.messages || [];
+
+                await setDoc(chatDocRef, { 
+                    messages: [...existingMessages, newMessage] 
+                }, { merge: false });
+
+                setMessageInput('');
+            } catch (error) {
+                console.error("Error sending message: ", error);
+            }
+        };
+
+
+        return (
+            <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row">
+                {/* ১. পোস্ট সেকশন */}
+                <div className="flex-1 p-6 md:p-8 bg-white border-r border-gray-200">
+                    <h2 className="text-3xl font-bold text-indigo-700 mb-6 border-b pb-2">
+                        {isOwner ? 'Shavi\'s Private Lounge (Owner)' : 'Community Feed'}
+                    </h2>
+                    
+                    {/* Shavi's Post Creation Area (Only Owner) */}
+                    {isOwner && (
+                        <div className="bg-indigo-50 p-6 rounded-xl shadow-md mb-8">
+                            <h3 className="text-xl font-semibold text-indigo-800 mb-4">Shavi's New Post</h3>
+                            <select 
+                                value={postType} 
+                                onChange={(e) => setPostType(e.target.value)}
+                                className="w-full p-2 mb-3 border border-indigo-300 rounded-lg bg-white focus:ring-indigo-500"
+                            >
+                                <option>ছবি</option>
+                                <option>ভিডিও</option>
+                                <option>কবিতা</option>
+                                <option>ব্যক্তিগত পোস্ট</option>
+                            </select>
+                            <textarea
+                                value={newPostContent}
+                                onChange={(e) => setNewPostContent(e.target.value)}
+                                placeholder="এখানে আপনার ব্যক্তিগত পোস্ট লিখুন (ছবি/ভিডিও লিঙ্ক দিতে পারেন)..."
+                                rows="4"
+                                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                            ></textarea>
+                            <button
+                                onClick={handleNewPost}
+                                disabled={!newPostContent.trim()}
+                                className="mt-3 py-2 px-6 bg-indigo-600 text-white rounded-full font-semibold hover:bg-indigo-700 disabled:opacity-50 transition"
+                            >
+                                পোস্ট করুন
+                            </button>
+                        </div>
+                    )}
+
+                    {/* All Posts Display */}
+                    <div className="space-y-6">
+                        {posts.length > 0 ? (
+                            posts.map((post) => (
+                                <div key={post.id} className="bg-gray-100 p-5 rounded-xl shadow-sm border-l-4 border-indigo-400">
+                                    <p className="text-xs text-gray-500 mb-1">
+                                        পোস্ট: {post.type} | সময়: {new Date(post.timestamp).toLocaleString('bn-BD')}
+                                    </p>
+                                    <p className="text-gray-700 whitespace-pre-wrap">{post.content}</p>
+                                </div>
+                            ))
+                        ) : (
+                            <p className="text-center text-gray-500">এখনও কোনো পোস্ট করা হয়নি।</p>
+                        )}
+                    </div>
+                </div>
+
+                {/* ২. মেম্বার এবং চ্যাট সেকশন */}
+                <div className="w-full md:w-96 bg-gray-50 p-6 md:p-8 flex flex-col border-l border-gray-200">
+                    <h2 className="text-2xl font-bold text-gray-800 mb-6 border-b pb-2">মেম্বার ও ইনবক্স</h2>
+                    
+                    {/* মেম্বার লিস্ট */}
+                    <div className="mb-8 border-b pb-4 overflow-y-auto max-h-48">
+                        <h3 className="text-lg font-semibold text-gray-700 mb-3">মেম্বার তালিকা ({members.length})</h3>
+                        <div className="space-y-3">
+                            {members.map(member => (
+                                <div key={member.id} className="flex justify-between items-center p-3 bg-white rounded-lg shadow-sm border border-gray-100">
+                                    <span className="text-sm font-medium text-gray-700">{member.name} ({member.id.substring(0, 4)}...)</span>
+                                    <div className="flex items-center space-x-2">
+                                        <button 
+                                            onClick={() => setActiveChat(member.id)}
+                                            className="text-indigo-500 hover:text-indigo-700 text-sm font-medium transition"
+                                        >
+                                            ইনবক্স
+                                        </button>
+                                        {isOwner && (
+                                            <button 
+                                                onClick={() => handleBlockMember(member.id, member.isBlocked)}
+                                                className={`text-xs px-2 py-1 rounded-full ${member.isBlocked ? 'bg-red-500 text-white' : 'bg-yellow-300 text-black'} hover:opacity-80 transition`}
+                                            >
+                                                {member.isBlocked ? 'আনব্লক করুন' : 'ব্লক করুন'}
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* চ্যাট বক্স */}
+                    <div className="flex-1 flex flex-col bg-white rounded-xl shadow-lg p-4">
+                        <h3 className="text-lg font-semibold text-gray-800 mb-4 border-b pb-2">
+                            {activeChat ? `Chatting with: ${members.find(m => m.id === activeChat)?.name || 'Member'}` : 'ইনবক্স নির্বাচন করুন'}
+                        </h3>
+                        
+                        <div className="flex-1 overflow-y-auto space-y-3 p-2 bg-gray-50 rounded-lg mb-4 h-64">
+                            {activeChat ? (
+                                chatMessages.length > 0 ? (
+                                    chatMessages.map((msg, index) => (
+                                        <div key={index} className={`flex ${msg.senderId === currentUserId ? 'justify-end' : 'justify-start'}`}>
+                                            <div className={`max-w-[75%] p-3 rounded-xl shadow-md ${msg.senderId === currentUserId ? 'bg-indigo-500 text-white rounded-br-none' : 'bg-gray-200 text-gray-800 rounded-tl-none'}`}>
+                                                <p className="text-xs font-semibold mb-1">{msg.senderId === currentUserId ? 'আপনি' : msg.senderName}</p>
+                                                <p>{msg.text}</p>
+                                            </div>
+                                        </div>
+                                    ))
+                                ) : (
+                                    <p className="text-center text-gray-500 pt-10">কথা বলা শুরু করুন!</p>
+                                )
+                            ) : (
+                                <p className="text-center text-gray-400 pt-10">ইনবক্সে মেসেজ দেখতে বাম দিক থেকে একটি মেম্বার নির্বাচন করুন।</p>
+                            )}
+                        </div>
+
+                        {/* মেসেজ ইনপুট */}
+                        {activeChat && (
+                            <div className="flex space-x-2">
+                                <input
+                                    type="text"
+                                    value={messageInput}
+                                    onChange={(e) => setMessageInput(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                    placeholder="আপনার বার্তা লিখুন..."
+                                    className="flex-1 p-3 border border-gray-300 rounded-full focus:ring-indigo-500 focus:border-indigo-500"
+                                />
+                                <button
+                                    onClick={handleSendMessage}
+                                    disabled={!messageInput.trim()}
+                                    className="p-3 bg-indigo-600 text-white rounded-full hover:bg-indigo-700 disabled:opacity-50 transition"
+                                >
+                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    // ব্লকড ইউজার স্ক্রিন
+    const BlockedScreen = () => (
+        <div className="min-h-screen bg-red-50 flex items-center justify-center p-4">
+            <div className="max-w-md w-full p-8 bg-white rounded-3xl shadow-2xl border-t-8 border-red-500 text-center space-y-4">
+                <h1 className="text-3xl font-bold text-red-700">অ্যাক্সেস ব্লকড!</h1>
+                <p className="text-lg text-gray-600">
+                    দুঃখিত, আপনি Shavi-এর ব্যক্তিগত কমিউনিটি থেকে ব্লকড হয়েছেন। এই ওয়েবসাইটটিতে আপনার আর কোনো অ্যাক্সেস নেই।
+                </p>
+                <p className="text-sm text-gray-500">
+                    যদি আপনার মনে হয় এটি একটি ভুল, তাহলে Shavi-এর সাথে হোয়াটসঅ্যাপে যোগাযোগ করুন।
+                </p>
+            </div>
+        </div>
+    );
+
+    // রেন্ডারিং (প্রধান লজিক)
+    if (!isAuthReady) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
+                <p className="text-xl">ওয়েবসাইট লোড হচ্ছে... (Authentication)</p>
+            </div>
+        );
+    }
+
+    if (isBlocked) {
+        return <BlockedScreen />;
+    }
+    
+    const currentUserName = registrationData?.name || (isOwner ? 'Shavi (Owner)' : 'Member');
+
+    switch (view) {
+        case 'welcome':
+            return <WelcomeScreen goToRegister={() => setView('register')} />;
+        case 'register':
+            return <RegisterScreen goToWelcome={() => setView('welcome')} />;
+        case 'dashboard':
+            return <Dashboard isOwner={isOwner} currentUserId={userId} currentUserName={currentUserName} />;
+        default:
+            return <WelcomeScreen goToRegister={() => setView('register')} />;
+    }
+};
+
+export default App;
